@@ -93,18 +93,14 @@ jobs:
             find "${target_dir}" -type f -name "*.pyo" -delete
             find "${target_dir}" -type f -name "*.pyd" -delete
             find "${target_dir}" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-            find "${target_dir}" -type f -name "*.so" ! -name "_opencv_*" -delete
-
+            
             # Remove documentation and other non-essential files
             find "${target_dir}" -type d -name "docs" -exec rm -rf {} + 2>/dev/null || true
             find "${target_dir}" -type d -name "examples" -exec rm -rf {} + 2>/dev/null || true
-            find "${target_dir}" -type f -name "*.html" -delete
-            find "${target_dir}" -type f -name "*.txt" ! -name "requirements.txt" -delete
-            find "${target_dir}" -type f -name "*.md" -delete
             
             # If opencv is installed, keep only essential binaries
             if [ -d "${target_dir}/cv2" ]; then
-              find "${target_dir}/cv2" -type f ! -name "*.so" ! -name "__init__.py" -delete
+              find "${target_dir}/cv2" -type f ! -name "*.so" ! -name "__init__.py" -delete 2>/dev/null || true
             fi
           }
 
@@ -142,9 +138,8 @@ jobs:
             local size_before=$(du -sb "${temp_dir}" | cut -f1)
             echo "Package size before compression: $(( size_before / 1024 / 1024 )) MB"
             
-            # Create optimized ZIP with maximum compression
             echo "Creating ZIP file..."
-            (cd "${temp_dir}" && zip -9 --symlinks --quiet "${GITHUB_WORKSPACE}/${zip_file}" . -x "*.pyc" "*.pyo" "*.pyd" "__pycache__/*" "*.so" "test/*" "tests/*" "*.html" "*.txt" "*.md") || {
+            (cd "${temp_dir}" && find . -type f -print0 | xargs -0 zip -9 --symlinks "${GITHUB_WORKSPACE}/${zip_file}") || {
               echo "Failed to create ZIP for ${lambda_dir_name}"
               return 1
             }
@@ -167,6 +162,7 @@ jobs:
             }
             
             # Update Lambda function
+            echo "Updating Lambda function..."
             aws lambda update-function-code \
               --function-name "${PROJECT_NAME}-${lambda_name}" \
               --s3-bucket "${LAMBDA_BUCKET}" \
@@ -178,6 +174,7 @@ jobs:
             echo "Successfully processed ${lambda_name}"
           }
           
+          # Process each Lambda
           create_lambda_package "video-processor" "video_processor" || {
             echo "Failed to process video-processor"
             exit 1
