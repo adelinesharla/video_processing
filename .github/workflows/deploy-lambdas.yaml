@@ -1,5 +1,4 @@
 name: Deploy Lambda Functions
-
 on:
   push:
     branches:
@@ -7,12 +6,10 @@ on:
   pull_request:
     branches:
       - main
-
 env:
   REGION_DEFAULT: "us-east-1"
   PROJECT_NAME: "video-processor"
   LAMBDA_BUCKET: "lambda-artifacts-video-processor"
-
 jobs:
   test:
     name: Run Tests
@@ -20,12 +17,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
       - name: Install dependencies
         run: |
           for lambda in lambda/*/; do
@@ -34,7 +29,6 @@ jobs:
             pip install pytest pytest-cov pytest-mock
             cd ../..
           done
-
       - name: Run tests
         run: |
           chmod +x run_tests.sh
@@ -48,7 +42,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v3
-
+      
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
@@ -56,55 +50,93 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.REGION_DEFAULT }}
-
+      
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-
-      - name: Install system dependencies for OpenCV
+      
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-glx
-
+          sudo apt-get install -y \
+            libgl1 \
+            libglib2.0-0 \
+            libsm6 \
+            libxext6 \
+            libxrender-dev \
+            libgstreamer1.0-0 \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good
+      
       - name: Build and upload Lambda packages
         run: |
-          # Função para criar o pacote ZIP
+          # Function to create Lambda package
           create_lambda_package() {
             local lambda_name=$1
             local temp_dir=$(mktemp -d)
             local zip_file="${lambda_name}.zip"
             
-            # Instala dependências no diretório temporário
-            pip install -r lambda/${lambda_name}/requirements.txt --target ${temp_dir}
+            echo "Creating package for ${lambda_name}..."
             
-            # Copia código fonte
-            cp -r lambda/${lambda_name}/src/* ${temp_dir}/
+            # Install dependencies in temporary directory
+            if [ -f "lambda/${lambda_name}/requirements.txt" ]; then
+              pip install -r "lambda/${lambda_name}/requirements.txt" --target "${temp_dir}" || {
+                echo "Failed to install dependencies for ${lambda_name}"
+                return 1
+              }
+            fi
             
-            # Cria ZIP
-            cd ${temp_dir}
-            zip -r9 ${GITHUB_WORKSPACE}/${zip_file} .
-            cd ${GITHUB_WORKSPACE}
+            # Copy source code
+            if [ -d "lambda/${lambda_name}/src" ]; then
+              cp -r "lambda/${lambda_name}/src/"* "${temp_dir}/" || {
+                echo "Failed to copy source code for ${lambda_name}"
+                return 1
+              }
+            else
+              echo "Warning: No src directory found for ${lambda_name}"
+              return 1
+            fi
             
-            # Upload para S3
-            aws s3 cp ${zip_file} s3://${LAMBDA_BUCKET}/${lambda_name}/${zip_file}
+            # Create ZIP
+            (cd "${temp_dir}" && zip -r9 "${GITHUB_WORKSPACE}/${zip_file}" .) || {
+              echo "Failed to create ZIP for ${lambda_name}"
+              return 1
+            }
             
-            # Atualiza função Lambda
+            # Upload to S3
+            aws s3 cp "${zip_file}" "s3://${LAMBDA_BUCKET}/${lambda_name}/${zip_file}" || {
+              echo "Failed to upload ${lambda_name} to S3"
+              return 1
+            }
+            
+            # Update Lambda function
             aws lambda update-function-code \
-              --function-name ${PROJECT_NAME}-${lambda_name} \
-              --s3-bucket ${LAMBDA_BUCKET} \
-              --s3-key ${lambda_name}/${zip_file}
+              --function-name "${PROJECT_NAME}-${lambda_name}" \
+              --s3-bucket "${LAMBDA_BUCKET}" \
+              --s3-key "${lambda_name}/${zip_file}" || {
+              echo "Failed to update Lambda function ${lambda_name}"
+              return 1
+            }
+            
+            echo "Successfully processed ${lambda_name}"
           }
           
-          # Processa cada Lambda
+          # Process each Lambda
           for lambda in video_processor upload_handler notification_handler; do
             echo "Processing ${lambda}..."
-            create_lambda_package ${lambda}
+            create_lambda_package "${lambda}" || {
+              echo "Failed to process ${lambda}"
+              exit 1
+            }
           done
-
+      
       - name: Verify deployments
         run: |
           for lambda in video_processor upload_handler notification_handler; do
             echo "Verifying ${lambda}..."
-            aws lambda get-function --function-name ${PROJECT_NAME}-${lambda}
+            aws lambda get-function --function-name "${PROJECT_NAME}-${lambda}" || {
+              echo "Failed to verify ${lambda}"
+              exit 1
+            }
           done
