@@ -71,6 +71,43 @@ jobs:
       
       - name: Build and upload Lambda packages
         run: |
+          # Function to optimize pip installations
+          optimize_pip_install() {
+            local requirements_file=$1
+            local target_dir=$2
+            
+            # Install only required packages without dev dependencies
+            pip install \
+              --no-cache-dir \
+              --no-deps \
+              --python-version 3.9 \
+              --platform manylinux2014_x86_64 \
+              --only-binary=:all: \
+              --target "${target_dir}" \
+              -r "${requirements_file}"
+            
+            # Remove unnecessary files
+            find "${target_dir}" -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
+            find "${target_dir}" -type d -name "test" -exec rm -rf {} + 2>/dev/null || true
+            find "${target_dir}" -type f -name "*.pyc" -delete
+            find "${target_dir}" -type f -name "*.pyo" -delete
+            find "${target_dir}" -type f -name "*.pyd" -delete
+            find "${target_dir}" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+            find "${target_dir}" -type f -name "*.so" ! -name "_opencv_*" -delete
+
+            # Remove documentation and other non-essential files
+            find "${target_dir}" -type d -name "docs" -exec rm -rf {} + 2>/dev/null || true
+            find "${target_dir}" -type d -name "examples" -exec rm -rf {} + 2>/dev/null || true
+            find "${target_dir}" -type f -name "*.html" -delete
+            find "${target_dir}" -type f -name "*.txt" ! -name "requirements.txt" -delete
+            find "${target_dir}" -type f -name "*.md" -delete
+            
+            # If opencv is installed, keep only essential binaries
+            if [ -d "${target_dir}/cv2" ]; then
+              find "${target_dir}/cv2" -type f ! -name "*.so" ! -name "__init__.py" -delete
+            fi
+          }
+
           # Function to create Lambda package
           create_lambda_package() {
             local lambda_name=$1
@@ -80,9 +117,10 @@ jobs:
             
             echo "Creating package for ${lambda_name}..."
             
-            # Install dependencies in temporary directory
+            # Install and optimize dependencies
             if [ -f "lambda/${lambda_dir_name}/requirements.txt" ]; then
-              pip install -r "lambda/${lambda_dir_name}/requirements.txt" --target "${temp_dir}" || {
+              echo "Installing optimized dependencies..."
+              optimize_pip_install "lambda/${lambda_dir_name}/requirements.txt" "${temp_dir}" || {
                 echo "Failed to install dependencies for ${lambda_dir_name}"
                 return 1
               }
@@ -90,6 +128,7 @@ jobs:
             
             # Copy source code
             if [ -d "lambda/${lambda_dir_name}/src" ]; then
+              echo "Copying source code..."
               cp -r "lambda/${lambda_dir_name}/src/"* "${temp_dir}/" || {
                 echo "Failed to copy source code for ${lambda_dir_name}"
                 return 1
@@ -99,13 +138,29 @@ jobs:
               return 1
             fi
             
-            # Create ZIP
-            (cd "${temp_dir}" && zip -r9 "${GITHUB_WORKSPACE}/${zip_file}" .) || {
+            # Calculate package size before compression
+            local size_before=$(du -sb "${temp_dir}" | cut -f1)
+            echo "Package size before compression: $(( size_before / 1024 / 1024 )) MB"
+            
+            # Create optimized ZIP with maximum compression
+            echo "Creating ZIP file..."
+            (cd "${temp_dir}" && zip -9 --symlinks --quiet "${GITHUB_WORKSPACE}/${zip_file}" . -x "*.pyc" "*.pyo" "*.pyd" "__pycache__/*" "*.so" "test/*" "tests/*" "*.html" "*.txt" "*.md") || {
               echo "Failed to create ZIP for ${lambda_dir_name}"
               return 1
             }
             
+            # Calculate ZIP size
+            local zip_size=$(stat -f%z "${GITHUB_WORKSPACE}/${zip_file}" 2>/dev/null || stat -c%s "${GITHUB_WORKSPACE}/${zip_file}")
+            echo "ZIP file size: $(( zip_size / 1024 / 1024 )) MB"
+            
+            # Check if ZIP size exceeds Lambda limits
+            if [ ${zip_size} -gt 250000000 ]; then
+              echo "Error: Package size exceeds Lambda limit of 250MB"
+              return 1
+            fi
+            
             # Upload to S3
+            echo "Uploading to S3..."
             aws s3 cp "${zip_file}" "s3://${LAMBDA_BUCKET}/${lambda_dir_name}/${zip_file}" || {
               echo "Failed to upload ${lambda_dir_name} to S3"
               return 1
