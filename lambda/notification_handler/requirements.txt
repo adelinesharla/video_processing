@@ -1,0 +1,4 @@
+# lambda/notification_handler/requirements.txt
+boto3==1.28.44
+python-jose==3.3.0
+requests==2.31.0

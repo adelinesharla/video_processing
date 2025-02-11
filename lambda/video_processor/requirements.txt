@@ -1,0 +1,4 @@
+opencv-python-headless==4.8.0.76
+boto3==1.28.44
+python-jose==3.3.0
+requests==2.31.0
