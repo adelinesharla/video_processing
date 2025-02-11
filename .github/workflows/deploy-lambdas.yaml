@@ -1,0 +1,110 @@
+name: Deploy Lambda Functions
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  REGION_DEFAULT: "us-east-1"
+  PROJECT_NAME: "video-processor"
+  LAMBDA_BUCKET: "lambda-artifacts-video-processor"
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          for lambda in lambda/*/; do
+            cd $lambda
+            pip install -r requirements.txt
+            pip install pytest pytest-cov pytest-mock
+            cd ../..
+          done
+
+      - name: Run tests
+        run: |
+          chmod +x run_tests.sh
+          ./run_tests.sh
+
+  build-and-deploy:
+    name: Build and Deploy Lambdas
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.REGION_DEFAULT }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install system dependencies for OpenCV
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-glx
+
+      - name: Build and upload Lambda packages
+        run: |
+          # Função para criar o pacote ZIP
+          create_lambda_package() {
+            local lambda_name=$1
+            local temp_dir=$(mktemp -d)
+            local zip_file="${lambda_name}.zip"
+            
+            # Instala dependências no diretório temporário
+            pip install -r lambda/${lambda_name}/requirements.txt --target ${temp_dir}
+            
+            # Copia código fonte
+            cp -r lambda/${lambda_name}/src/* ${temp_dir}/
+            
+            # Cria ZIP
+            cd ${temp_dir}
+            zip -r9 ${GITHUB_WORKSPACE}/${zip_file} .
+            cd ${GITHUB_WORKSPACE}
+            
+            # Upload para S3
+            aws s3 cp ${zip_file} s3://${LAMBDA_BUCKET}/${lambda_name}/${zip_file}
+            
+            # Atualiza função Lambda
+            aws lambda update-function-code \
+              --function-name ${PROJECT_NAME}-${lambda_name} \
+              --s3-bucket ${LAMBDA_BUCKET} \
+              --s3-key ${lambda_name}/${zip_file}
+          }
+          
+          # Processa cada Lambda
+          for lambda in video_processor upload_handler notification_handler; do
+            echo "Processing ${lambda}..."
+            create_lambda_package ${lambda}
+          done
+
+      - name: Verify deployments
+        run: |
+          for lambda in video_processor upload_handler notification_handler; do
+            echo "Verifying ${lambda}..."
+            aws lambda get-function --function-name ${PROJECT_NAME}-${lambda}
+          done
